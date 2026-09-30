@@ -4,8 +4,7 @@ use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::render::settings::{Backends, PowerPreference, RenderCreation, WgpuSettings};
 use bevy::render::RenderPlugin;
-use bevy::render::view::VisibilitySystems;
-use bevy::window::{CursorGrabMode, PrimaryWindow};
+use bevy::window::{CursorGrabMode, PrimaryWindow, WindowResolution};
 use std::path::Path;
 use std::time::Instant;
 use vpk::VPK;
@@ -19,6 +18,10 @@ const FLYCAM_SPEED: f32 = 250.0;
 const FLYCAM_SENSITIVITY: f32 = 0.003;
 const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 * 0.99;
 const AMBIENT_BRIGHTNESS: f32 = 250.0;
+
+/// Internal render scale. 1.0 renders at the window's 1280x720; lower values
+/// render smaller and upscale, trading sharpness for fill rate.
+const RENDER_SCALE: f32 = 0.75;
 
 fn inspect_vpk_archive() {
     let Some(gmod_dir) = find_gmod_dir() else {
@@ -142,24 +145,35 @@ fn setup_scene(
     if let Some(map) = map {
         // Backface culling is now safe because the mesh builder normalises
         // triangle winding against each face's plane normal.
+        // `unlit` skips the whole PBR fragment path (lights, roughness,
+        // ambient, dither). The audit shows frame time scaling with screen
+        // coverage, i.e. a fill-rate problem, so simplifying the fragment
+        // shader is the highest-value change.
+        //
+        // Cost: per-face shading is lost, so the map reads flat until the
+        // BSP lightmaps (LUMP_LIGHTING) are decoded, which is the proper fix
+        // for baked lighting anyway. Directional light shadows are already off.
         let materials: Vec<Handle<StandardMaterial>> = map
             .bucket_names
             .iter()
             .map(|name| {
                 materials.add(StandardMaterial {
                     base_color: placeholder_color(name),
-                    perceptual_roughness: 0.9,
+                    unlit: true,
                     ..default()
                 })
             })
             .collect();
 
         for (bucket, chunk) in &map.chunks {
-            commands.spawn(PbrBundle {
-                mesh: meshes.add(chunk.clone()),
-                material: materials[*bucket].clone(),
-                ..default()
-            });
+            commands.spawn((
+                PbrBundle {
+                    mesh: meshes.add(chunk.clone()),
+                    material: materials[*bucket].clone(),
+                    ..default()
+                },
+                MapChunk,
+            ));
         }
 
         spawn_camera(
@@ -249,7 +263,7 @@ fn update_fps_overlay(
     let mut line = format!("{fps:.1} fps");
     if let Some(stats) = stats {
         line.push_str(&format!(
-            "  chunks {}/{} visible  tris {}",
+            "  in frustum {}/{} chunks  tris {}",
             stats.chunks_visible, stats.chunks_total, stats.triangles_total
         ));
     }
@@ -268,28 +282,42 @@ fn report_render_backend(
     );
     for window in &windows {
         println!(
-            "[perf] primary window: {}x{} physical, scale {:?}",
+            "[perf] primary window: {}x{} physical, {}x{} render target (scale {})",
             window.physical_width(),
             window.physical_height(),
-            window.scale_factor()
+            window.resolution.width() as u32 * window.resolution.scale_factor() as u32,
+            window.resolution.height() as u32 * window.resolution.scale_factor() as u32,
+            window.resolution.scale_factor()
         );
     }
 }
 
-/// Counts how many chunk entities actually survived frustum culling.
+/// Counts how many chunk meshes intersect the camera frustum.
 ///
-/// `VisibleEntities` only exists inside the render sub-app, so this system is
-/// scheduled there and publishes the count back to the main app as a resource.
+/// This does the frustum test itself rather than reading Bevy's
+/// `VisibleEntities`: that component only exists in the render sub-app, and the
+/// previous version of this system silently reported 0 because it was reading
+/// the wrong world. Testing our own AABBs in the main app is also what tells us
+/// whether chunking is worth keeping at all.
 fn count_visible_chunks(
-    visible: Query<&bevy::render::view::VisibleEntities>,
-    mut main_app: ResMut<bevy::render::MainWorld>,
+    frustum: Query<&bevy::render::primitives::Frustum, With<Camera3d>>,
+    chunks: Query<&bevy::render::primitives::Aabb, With<MapChunk>>,
+    mut stats: ResMut<RenderStats>,
 ) {
-    // Includes UI entities, so this is an upper bound on chunk draw calls.
-    let drawn: usize = visible.iter().map(|entities| entities.len()).sum();
+    let Some(frustum) = frustum.get_single() else {
+        return;
+    };
 
-    if let Some(mut stats) = main_app.get_resource_mut::<RenderStats>() {
-        stats.chunks_visible = drawn;
+    let identity = bevy::math::Affine3A::IDENTITY;
+    let mut visible = 0_usize;
+
+    for aabb in &chunks {
+        if frustum.intersects_obb(aabb, &identity, true, true) {
+            visible += 1;
+        }
     }
+
+    stats.chunks_visible = visible;
 }
 
 /// One-line performance summary printed to the console a couple of seconds in.
@@ -322,31 +350,22 @@ fn log_startup_stats(
     }
     if let Some(stats) = stats {
         println!(
-            "[perf] chunks visible after culling: {}/{}, triangles in map: {}",
+            "[perf] chunks inside camera frustum: {}/{}, triangles in map: {}",
             stats.chunks_visible, stats.chunks_total, stats.triangles_total
         );
         if stats.chunks_total > 0 {
             println!(
-                "[perf] culling kept {:.1}% of chunks",
+                "[perf] frustum kept {:.1}% of chunks",
                 100.0 * stats.chunks_visible as f32 / stats.chunks_total as f32
             );
         }
     }
 }
 
-/// Schedules the cull counter inside the render sub-app.
-///
-/// `RenderApp` is an App label rather than a Resource, so this cannot be a
-/// normal system: it takes `&mut App` and is called directly from `main` after
-/// the plugins are registered. `VisibleEntities` only exists inside that
-/// sub-app, so this is the only way to observe culled chunk counts.
-fn setup_cull_counter(app: &mut App) {
-    app.sub_app_mut(bevy::render::RenderApp)
-        .add_systems(
-            PostUpdate,
-            count_visible_chunks.after(VisibilitySystems::CheckVisibility),
-        );
-}
+/// Marks every spawned world chunk so the cull counter can identify them
+/// without matching on mesh handles.
+#[derive(Component)]
+struct MapChunk;
 
 fn main() {
     println!("universal-nostalgia-engine {} starting", env!("CARGO_PKG_VERSION"));
@@ -388,7 +407,11 @@ fn main() {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "Universal Nostalgia Engine".to_string(),
-                    resolution: (1280.0_f32, 720.0_f32).into(),
+                    // Logical size stays 720p; the scale factor override makes
+                    // Bevy render to a smaller framebuffer and upscale, which
+                    // cuts fill rate roughly in half on the weakest scenes.
+                    resolution: WindowResolution::new(1280.0, 720.0)
+                        .with_scale_factor_override(RENDER_SCALE),
                     ..default()
                 }),
                 ..default()
@@ -406,17 +429,18 @@ fn main() {
             Startup,
             (setup_scene, setup_fps_overlay, report_render_backend).chain(),
         )
+        // The overlay and console read the stats, so the cull count has to land
+        // before them in the same frame.
         .add_systems(
             Update,
             (
+                flycam_system,
+                count_visible_chunks,
                 update_fps_overlay,
                 log_startup_stats,
-                flycam_system,
             )
                 .chain(),
         );
-
-    setup_cull_counter(&mut app);
 
     app.run();
 }

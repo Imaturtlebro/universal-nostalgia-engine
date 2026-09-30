@@ -212,11 +212,10 @@ pub fn load_map() -> Option<LoadedMap> {
     // map is worse than the culling win. A single material per cell keeps one
     // draw call per visible cell; the cell's dominant texture is used for its
     // colour, so a cell still reads as roughly one surface type.
-    let mut cell_buckets: HashMap<usize, usize> = HashMap::new();
     let mut chunk_count = 0_u32;
     let mut meshes: Vec<ChunkMesh> = Vec::new();
 
-    for (cell, buckets_in_cell) in chunks {
+    for buckets_in_cell in chunks.into_values() {
         let mut total_triangles = 0_usize;
         let mut dominant_bucket = 0_usize;
         let mut dominant_triangles = 0_usize;
@@ -248,7 +247,6 @@ pub fn load_map() -> Option<LoadedMap> {
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
 
-        cell_buckets.insert(cell, dominant_bucket);
         meshes.push((dominant_bucket, mesh));
         chunk_count += 1;
     }
@@ -259,8 +257,8 @@ pub fn load_map() -> Option<LoadedMap> {
          ({flipped_triangles} had reversed winding)"
     );
     println!(
-        "[bsp] {chunk_count} distinct textures used, drawn from {} material buckets",
-        cell_buckets.len()
+        "[bsp] {chunk_count} chunks coloured from {} distinct textures",
+        bucket_names.len()
     );
     // Only the first few buckets are listed: there are hundreds, and dumping
     // them all buries the rest of the startup log.

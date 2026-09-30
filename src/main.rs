@@ -334,22 +334,18 @@ fn log_startup_stats(
     }
 }
 
-/// Schedules the cull counter inside the render sub-app, where
-/// `VisibleEntities` lives, and seeds the main-app stats resource.
-fn setup_cull_counter(
-    render_app: Res<bevy::render::RenderApp>,
-    stats: Option<Res<RenderStats>>,
-) {
-    if stats.is_none() {
-        return;
-    }
-
-    // PostUpdate on the render app is where the visibility systems live, so
-    // ordering after CheckVisibility guarantees VisibleEntities is populated.
-    render_app.add_systems(
-        PostUpdate,
-        count_visible_chunks.after(VisibilitySystems::CheckVisibility),
-    );
+/// Schedules the cull counter inside the render sub-app.
+///
+/// `RenderApp` is an App label rather than a Resource, so this cannot be a
+/// normal system: it takes `&mut App` and is called directly from `main` after
+/// the plugins are registered. `VisibleEntities` only exists inside that
+/// sub-app, so this is the only way to observe culled chunk counts.
+fn setup_cull_counter(app: &mut App) {
+    app.sub_app_mut(bevy::render::RenderApp)
+        .add_systems(
+            PostUpdate,
+            count_visible_chunks.after(VisibilitySystems::CheckVisibility),
+        );
 }
 
 fn main() {
@@ -408,13 +404,7 @@ fn main() {
         )
         .add_systems(
             Startup,
-            (
-                setup_scene,
-                setup_fps_overlay,
-                report_render_backend,
-                setup_cull_counter,
-            )
-                .chain(),
+            (setup_scene, setup_fps_overlay, report_render_backend).chain(),
         )
         .add_systems(
             Update,
@@ -424,8 +414,11 @@ fn main() {
                 flycam_system,
             )
                 .chain(),
-        )
-        .run();
+        );
+
+    setup_cull_counter(&mut app);
+
+    app.run();
 }
 
 fn flycam_system(

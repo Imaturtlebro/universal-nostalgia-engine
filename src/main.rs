@@ -17,15 +17,22 @@ use bsp_world::{find_gmod_dir, LoadedMap};
 const FLYCAM_SPEED: f32 = 250.0;
 const FLYCAM_SENSITIVITY: f32 = 0.003;
 const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 * 0.99;
-/// Ambient fill. Kept low so the directional light defines the shading and
-/// faces pointing away from it do not go fully black. This is a plain
-/// multiplier, not a lux value.
-const AMBIENT_BRIGHTNESS: f32 = 0.4;
+/// Ambient fill, as a plain multiplier on the ambient colour.
+///
+/// Bevy does NOT convert this to lux: in `bevy_pbr`'s `prepare_lights` the
+/// ambient contribution is `color * brightness`, pre-multiplied exactly like
+/// the directional light's `color * illuminance`. So these two values are
+/// directly comparable, and their ratio is the scene's contrast ratio.
+const AMBIENT_BRIGHTNESS: f32 = 0.3;
 
-/// Direct sunlight in lux, matching Bevy's own
-/// `light_consts::lux::DIRECT_SUNLIGHT`. Bevy 0.13 switched lights to physical
-/// units, so this is ~100000 rather than the old arbitrary 10000.
-const SUN_ILLUMINANCE: f32 = 100_000.0;
+/// Sun strength, deliberately far below physical `DIRECT_SUNLIGHT` (100000).
+///
+/// Physically-scaled light only makes sense with an auto-exposure pipeline,
+/// which we do not have. At a true 100000 the ratio against ambient below
+/// 100000:1 and every face turned away from the sun renders pure black while
+/// lit faces blow out to white. 3.0 keeps the sun dominant but leaves the
+/// ambient able to fill shadowed faces.
+const SUN_ILLUMINANCE: f32 = 3.0;
 
 /// Internal render scale. 1.0 renders at the window's 1280x720; lower values
 /// render smaller and upscale, trading sharpness for fill rate.
@@ -126,6 +133,10 @@ fn spawn_camera(commands: &mut Commands, position: Vec3, yaw: f32, pitch: f32) {
     commands.spawn((
         Camera3dBundle {
             transform: Transform::from_translation(position),
+            // Without any exposure adaptation, the HDR buffer needs a display
+            // transform or bright surfaces clip to flat white. ACES rolls off
+            // highlights rather than hard-clipping them.
+            tonemapping: Tonemapping::AcesFitted,
             ..default()
         },
         Flycam { yaw, pitch },
@@ -165,6 +176,9 @@ fn setup_scene(
                 materials.add(StandardMaterial {
                     base_color: placeholder_color(name),
                     perceptual_roughness: 0.95,
+                    // Suppress specular highlights: they render as pure white
+                    // and read as "blown out" against untextured walls.
+                    reflectance: 0.0,
                     ..default()
                 })
             })

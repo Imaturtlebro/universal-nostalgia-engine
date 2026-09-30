@@ -2,7 +2,7 @@ use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::render::settings::{Backends, PowerPreference, RenderCreation, WgpuSettings};
 use bevy::render::RenderPlugin;
-use bevy::window::CursorGrabMode;
+use bevy::window::{CursorGrabMode, PrimaryWindow};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use vpk::VPK;
@@ -231,11 +231,8 @@ fn flycam_system(
 
     for mut camera in &mut cameras {
         if motion != Vec2::ZERO {
-            let yaw = Quat::from_rotation_y(-motion.x * FLYCAM_SENSITIVITY);
-            let pitch =
-                Quat::from_rotation_x(-motion.y * FLYCAM_SENSITIVITY);
-            camera.rotate_y(yaw);
-            camera.rotate_x(pitch);
+            camera.rotate_y(-motion.x * FLYCAM_SENSITIVITY);
+            camera.rotate_x(-motion.y * FLYCAM_SENSITIVITY);
         }
 
         if direction != Vec3::ZERO {
@@ -244,7 +241,8 @@ fn flycam_system(
             let motion_direction =
                 forward * direction.z + right * direction.x + Vec3::Y * direction.y;
 
-            camera.translation += motion_direction.normalize_or_zero() * FLYCAM_SPEED * time.delta_secs();
+            camera.translation +=
+                motion_direction.normalize_or_zero() * FLYCAM_SPEED * time.delta_seconds();
         }
     }
 }

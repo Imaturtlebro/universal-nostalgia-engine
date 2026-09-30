@@ -304,7 +304,8 @@ fn count_visible_chunks(
     chunks: Query<&bevy::render::primitives::Aabb, With<MapChunk>>,
     mut stats: ResMut<RenderStats>,
 ) {
-    let Some(frustum) = frustum.get_single() else {
+    // `Query::get_single` returns a Result, not an Option.
+    let Ok(frustum) = frustum.get_single() else {
         return;
     };
 

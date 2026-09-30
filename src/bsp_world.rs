@@ -3,6 +3,7 @@ use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::PrimitiveTopology;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 use vbsp::{Bsp, Vector};
 
@@ -25,6 +26,9 @@ pub struct ChunkMesh {
     pub mesh: Mesh,
     pub center: Vec3,
     pub radius: f32,
+    /// Leaf clusters this chunk touches. A chunk is drawn if *any* of them is
+    /// in the camera's Potentially Visible Set.
+    pub clusters: Vec<i16>,
 }
 
 #[derive(Resource)]
@@ -33,6 +37,8 @@ pub struct LoadedMap {
     /// Lowercased texture name per material bucket index.
     pub bucket_names: Vec<String>,
     pub triangles_total: usize,
+    /// Kept for Potentially Visible Set queries at runtime.
+    pub bsp: Arc<Bsp>,
     pub spawn_position: Vec3,
     pub spawn_yaw: f32,
     pub spawn_pitch: f32,
@@ -63,6 +69,11 @@ fn source_to_bevy(v: [f32; 3]) -> [f32; 3] {
 /// culling precision for far fewer draw calls.
 const CHUNK_SIZE: f32 = 6144.0;
 
+/// How far in front of a face to sample when working out which leaf it opens
+/// into, in Source units. Large enough to clear the wall, small enough to stay
+/// in the same room.
+const PVS_PROBE_OFFSET: f32 = 8.0;
+
 type ChunkKey = [i32; 3];
 
 #[derive(Default)]
@@ -70,6 +81,8 @@ struct ChunkBuffers {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
+    /// Leaf clusters this chunk's faces open into, used for PVS culling.
+    clusters: Vec<i16>,
 }
 
 /// Centre and radius of the smallest sphere containing every vertex, computed
@@ -227,6 +240,20 @@ pub fn load_map() -> Option<LoadedMap> {
                 .entry(bucket)
                 .or_default();
 
+            // Sample the leaf just in front of the face, not at the centroid:
+            // a centroid can sit inside the wall, which would associate the
+            // face with the wrong side of the geometry.
+            let probe = triangle_center(triangle)
+                + Vector {
+                    x: plane_normal.x,
+                    y: plane_normal.y,
+                    z: plane_normal.z,
+                } * PVS_PROBE_OFFSET;
+            let cluster = bsp.leaf_at(probe).cluster;
+            if cluster >= 0 && !chunk.clusters.contains(&cluster) {
+                chunk.clusters.push(cluster);
+            }
+
             for (index, corner) in corners.into_iter().enumerate() {
                 chunk.positions.push(corner);
                 chunk.normals.push(normal);
@@ -260,6 +287,16 @@ pub fn load_map() -> Option<LoadedMap> {
             }
         }
 
+        // Union of the leaf clusters every face in this cell opens into.
+        let mut clusters: Vec<i16> = Vec::new();
+        for (_, buffers) in &buckets_in_cell {
+            for cluster in &buffers.clusters {
+                if !clusters.contains(cluster) {
+                    clusters.push(*cluster);
+                }
+            }
+        }
+
         let mut positions: Vec<[f32; 3]> = Vec::with_capacity(total_triangles * 3);
         let mut normals: Vec<[f32; 3]> = Vec::with_capacity(total_triangles * 3);
         let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(total_triangles * 3);
@@ -286,6 +323,7 @@ pub fn load_map() -> Option<LoadedMap> {
             mesh,
             center,
             radius,
+            clusters,
         });
         chunk_count += 1;
     }
@@ -322,6 +360,9 @@ pub fn load_map() -> Option<LoadedMap> {
         chunks: meshes,
         bucket_names,
         triangles_total: triangles as usize,
+        // The parsed BSP is kept for PVS queries. Most of the 35 MB file is
+        // not retained, but the decompressed visibility set alone is ~12 MB.
+        bsp: Arc::new(bsp),
         spawn_position,
         spawn_yaw,
         spawn_pitch,

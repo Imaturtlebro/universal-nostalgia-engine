@@ -10,6 +10,7 @@ use bevy::render::RenderPlugin;
 use bevy::window::{CursorGrabMode, PrimaryWindow, WindowResolution};
 use std::path::Path;
 use std::time::Instant;
+use vbsp::Vector;
 use vpk::VPK;
 
 mod bsp_world;
@@ -209,6 +210,7 @@ fn setup_scene(
                 MapChunk {
                     center: chunk.center,
                     radius: chunk.radius,
+                    clusters: chunk.clusters.clone(),
                 },
             ));
         }
@@ -277,8 +279,10 @@ struct RenderStats {
     /// Chunk meshes in the loaded map, known at load time.
     chunks_total: usize,
     triangles_total: usize,
-    /// Chunks that survived frustum culling, reported by the render sub-app.
+    /// Chunks that survived frustum culling, reported by the cull systems.
     chunks_visible: usize,
+    /// Chunks that survived the BSP Potentially Visible Set.
+    chunks_in_pvs: usize,
 }
 
 fn update_fps_overlay(
@@ -300,8 +304,8 @@ fn update_fps_overlay(
     let mut line = format!("{fps:.1} fps");
     if let Some(stats) = stats {
         line.push_str(&format!(
-            "  in frustum {}/{} chunks  tris {}",
-            stats.chunks_visible, stats.chunks_total, stats.triangles_total
+            "  frustum {}/{}  pvs-visible {}/{}",
+            stats.chunks_visible, stats.chunks_total, stats.chunks_in_pvs, stats.chunks_total
         ));
     }
     text.sections[0].value = line;
@@ -386,15 +390,13 @@ fn log_startup_stats(
     }
     if let Some(stats) = stats {
         println!(
-            "[perf] chunks inside camera frustum: {}/{}, triangles in map: {}",
-            stats.chunks_visible, stats.chunks_total, stats.triangles_total
+            "[perf] chunks in camera frustum: {}/{}",
+            stats.chunks_visible, stats.chunks_total
         );
-        if stats.chunks_total > 0 {
-            println!(
-                "[perf] frustum kept {:.1}% of chunks",
-                100.0 * stats.chunks_visible as f32 / stats.chunks_total as f32
-            );
-        }
+        println!(
+            "[perf] chunks surviving BSP PVS + distance: {}/{}",
+            stats.chunks_in_pvs, stats.chunks_total
+        );
     }
 }
 
@@ -404,37 +406,99 @@ fn log_startup_stats(
 struct MapChunk {
     center: Vec3,
     radius: f32,
+    /// Leaf clusters this chunk touches, from the BSP.
+    clusters: Vec<i16>,
 }
 
-/// Hides chunks beyond `CHUNK_DRAW_DISTANCE`.
+/// Caches the decompressed PVS so it is only rebuilt when the camera moves to a
+/// different leaf cluster, rather than every frame.
+#[derive(Default)]
+struct PvsCache {
+    cluster: Option<i16>,
+    visible: Vec<bool>,
+}
+
+/// Hides chunks that are either too far away or enclosed by geometry the camera
+/// cannot see through.
 ///
-/// Frustum culling cannot help inside a dense area: standing in the warehouse,
-/// the tower is inside the view frustum yet contributes thousands of triangles
-/// from behind walls. A hard distance cut reclaims that. Chunks that are
-/// already hidden are skipped so the query only touches rows that change.
-fn cull_chunks_by_distance(
+/// Both tests live in one system on purpose: they write the same `Visibility`
+/// component, and if they ran separately the second would overwrite the first
+/// and could re-show a chunk the other had just hidden.
+///
+/// The distance test handles long-range culling. The PVS test handles the case
+/// frustum culling cannot: inside the warehouse, the far side of the building is
+/// inside the view frustum but behind walls. The BSP ships a precomputed
+/// Potentially Visible Set per leaf cluster, so that check is a bitset lookup
+/// rather than any ray casting.
+fn cull_chunks(
     camera: Query<&GlobalTransform, With<Camera3d>>,
     mut chunks: Query<(&MapChunk, &mut Visibility), With<MapChunk>>,
+    map: Option<Res<LoadedMap>>,
+    mut cache: Local<PvsCache>,
+    mut stats: ResMut<RenderStats>,
 ) {
     let Ok(camera) = camera.get_single() else {
         return;
     };
     let camera_position = camera.translation();
 
+    let mut pvs: Option<&Vec<bool>> = None;
+    if let Some(map) = map.as_ref() {
+        // Inverse of source_to_bevy: the BSP tree is in Source coordinates.
+        let camera_source = Vector {
+            x: camera_position.x,
+            y: -camera_position.z,
+            z: camera_position.y,
+        };
+
+        let cluster = map.bsp.leaf_at(camera_source).cluster;
+        if cluster >= 0 {
+            if cache.cluster != Some(cluster) {
+                let visible = map.bsp.vis_data.visible_clusters(cluster);
+                cache.visible =
+                    (0..visible.len()).map(|index| visible[index]).collect();
+                cache.cluster = Some(cluster);
+            }
+            pvs = Some(&cache.visible);
+        }
+    }
+
+    let mut drawn = 0_usize;
+
     for (chunk, mut visibility) in &mut chunks {
-        let distance = camera_position.distance(chunk.center) - chunk.radius;
-        let next = if distance > CHUNK_DRAW_DISTANCE {
-            Visibility::Hidden
-        } else {
+        let within_distance =
+            camera_position.distance(chunk.center) - chunk.radius <= CHUNK_DRAW_DISTANCE;
+
+        // No PVS data for this chunk (open sky, or faces that all sample solid
+        // leaves) means it is never occluded, so it is not distance-limited by
+        // the PVS test either.
+        let in_pvs = match pvs {
+            None => true,
+            Some(visible) => {
+                chunk.clusters.is_empty()
+                    || chunk.clusters.iter().any(|cluster| {
+                        visible.get(*cluster as usize).copied().unwrap_or(true)
+                    })
+            }
+        };
+
+        let next = if within_distance && in_pvs {
             Visibility::Visible
+        } else {
+            Visibility::Hidden
         };
 
         // Only write on change: `Mut` marks the component dirty on write, and
-        // dirtying all 50 chunks every frame would cause pointless extraction.
+        // dirtying all chunks every frame would cause pointless extraction.
         if *visibility != next {
             *visibility = next;
         }
+        if within_distance && in_pvs {
+            drawn += 1;
+        }
     }
+
+    stats.chunks_in_pvs = drawn;
 }
 
 fn main() {
@@ -468,6 +532,7 @@ fn main() {
             chunks_total: map.chunks.len(),
             triangles_total: map.triangles_total,
             chunks_visible: 0,
+            chunks_in_pvs: 0,
         });
         app.insert_resource(map);
     }
@@ -512,7 +577,7 @@ fn main() {
             Update,
             (
                 flycam_system,
-                cull_chunks_by_distance,
+                cull_chunks,
                 count_visible_chunks,
                 update_fps_overlay,
                 log_startup_stats,

@@ -1,4 +1,7 @@
 // bevy_diagnostic has no prelude module, so these must be imported explicitly.
+// `bevy_core_pipeline::prelude` only re-exports Camera3d/Camera3dBundle, so
+// Tonemapping (which lives in `core_3d::prelude`) needs an explicit import.
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;

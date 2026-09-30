@@ -111,6 +111,16 @@ fn triangle_center(corners: [[f32; 3]; 3]) -> Vec3 {
     (Vec3::from(corners[0]) + Vec3::from(corners[1]) + Vec3::from(corners[2])) / 3.0
 }
 
+/// Same as [`triangle_center`], but in Source coordinates and as a
+/// `vbsp::Vector`, which is what `Bsp::leaf_at` expects.
+fn triangle_center_source(corners: [[f32; 3]; 3]) -> Vector {
+    Vector {
+        x: (corners[0][0] + corners[1][0] + corners[2][0]) / 3.0,
+        y: (corners[0][1] + corners[1][1] + corners[2][1]) / 3.0,
+        z: (corners[0][2] + corners[1][2] + corners[2][2]) / 3.0,
+    }
+}
+
 fn geometric_normal(corners: [[f32; 3]; 3]) -> Vec3 {
     let a = Vec3::from(corners[0]);
     let b = Vec3::from(corners[1]);
@@ -242,13 +252,14 @@ pub fn load_map() -> Option<LoadedMap> {
 
             // Sample the leaf just in front of the face, not at the centroid:
             // a centroid can sit inside the wall, which would associate the
-            // face with the wrong side of the geometry.
-            let probe = triangle_center(triangle)
-                + Vector {
-                    x: plane_normal.x,
-                    y: plane_normal.y,
-                    z: plane_normal.z,
-                } * PVS_PROBE_OFFSET;
+            // face with the wrong side of the geometry. `leaf_at` works in
+            // Source coordinates, so this stays in Source space.
+            let centroid = triangle_center_source(triangle);
+            let probe = Vector {
+                x: centroid.x + plane_normal.x * PVS_PROBE_OFFSET,
+                y: centroid.y + plane_normal.y * PVS_PROBE_OFFSET,
+                z: centroid.z + plane_normal.z * PVS_PROBE_OFFSET,
+            };
             let cluster = bsp.leaf_at(probe).cluster;
             if cluster >= 0 && !chunk.clusters.contains(&cluster) {
                 chunk.clusters.push(cluster);

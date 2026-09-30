@@ -4,6 +4,7 @@ use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::render::settings::{Backends, PowerPreference, RenderCreation, WgpuSettings};
 use bevy::render::RenderPlugin;
+use bevy::render::view::VisibilitySystems;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 use std::path::Path;
 use std::time::Instant;
@@ -225,6 +226,8 @@ struct RenderStats {
     /// Chunk meshes in the loaded map, known at load time.
     chunks_total: usize,
     triangles_total: usize,
+    /// Chunks that survived frustum culling, reported by the render sub-app.
+    chunks_visible: usize,
 }
 
 fn update_fps_overlay(
@@ -246,9 +249,8 @@ fn update_fps_overlay(
     let mut line = format!("{fps:.1} fps");
     if let Some(stats) = stats {
         line.push_str(&format!(
-            "  map chunks {}  drawn tris {}",
-            stats.chunks_total,
-            stats.triangles_total
+            "  chunks {}/{} visible  tris {}",
+            stats.chunks_visible, stats.chunks_total, stats.triangles_total
         ));
     }
     text.sections[0].value = line;
@@ -274,8 +276,28 @@ fn report_render_backend(
     }
 }
 
+/// Counts how many chunk entities actually survived frustum culling.
+///
+/// `VisibleEntities` only exists inside the render sub-app, so this system is
+/// scheduled there and publishes the count back to the main app as a resource.
+fn count_visible_chunks(
+    visible: Query<&bevy::render::view::VisibleEntities>,
+    mut main_app: ResMut<bevy::render::MainWorld>,
+) {
+    // Includes UI entities, so this is an upper bound on chunk draw calls.
+    let drawn: usize = visible.iter().map(|entities| entities.len()).sum();
+
+    if let Some(mut stats) = main_app.get_resource_mut::<RenderStats>() {
+        stats.chunks_visible = drawn;
+    }
+}
+
 /// One-line performance summary printed to the console a couple of seconds in.
-fn log_startup_stats(diagnostics: Res<DiagnosticsStore>, mut done: Local<bool>) {
+fn log_startup_stats(
+    diagnostics: Res<DiagnosticsStore>,
+    stats: Option<Res<RenderStats>>,
+    mut done: Local<bool>,
+) {
     if *done {
         return;
     }
@@ -298,6 +320,36 @@ fn log_startup_stats(diagnostics: Res<DiagnosticsStore>, mut done: Local<bool>) 
     {
         println!("[perf] average frame time: {frame_time:.2} ms");
     }
+    if let Some(stats) = stats {
+        println!(
+            "[perf] chunks visible after culling: {}/{}, triangles in map: {}",
+            stats.chunks_visible, stats.chunks_total, stats.triangles_total
+        );
+        if stats.chunks_total > 0 {
+            println!(
+                "[perf] culling kept {:.1}% of chunks",
+                100.0 * stats.chunks_visible as f32 / stats.chunks_total as f32
+            );
+        }
+    }
+}
+
+/// Schedules the cull counter inside the render sub-app, where
+/// `VisibleEntities` lives, and seeds the main-app stats resource.
+fn setup_cull_counter(
+    render_app: Res<bevy::render::RenderApp>,
+    stats: Option<Res<RenderStats>>,
+) {
+    if stats.is_none() {
+        return;
+    }
+
+    // PostUpdate on the render app is where the visibility systems live, so
+    // ordering after CheckVisibility guarantees VisibleEntities is populated.
+    render_app.add_systems(
+        PostUpdate,
+        count_visible_chunks.after(VisibilitySystems::CheckVisibility),
+    );
 }
 
 fn main() {
@@ -330,13 +382,13 @@ fn main() {
         app.insert_resource(RenderStats {
             chunks_total: map.chunks.len(),
             triangles_total: map.triangles_total,
+            chunks_visible: 0,
         });
         app.insert_resource(map);
     }
 
     app.add_plugins(FrameTimeDiagnosticsPlugin::default())
-        .add_plugins(
-        DefaultPlugins
+        .add_plugins(DefaultPlugins
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "Universal Nostalgia Engine".to_string(),
@@ -360,6 +412,7 @@ fn main() {
                 setup_scene,
                 setup_fps_overlay,
                 report_render_backend,
+                setup_cull_counter,
             )
                 .chain(),
         )

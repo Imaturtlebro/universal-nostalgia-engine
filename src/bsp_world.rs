@@ -47,10 +47,13 @@ fn source_to_bevy(v: [f32; 3]) -> [f32; 3] {
     [v[0], v[2], -v[1]]
 }
 
-/// Side length of a spatial chunk, in Source units. gm_construct spans roughly
-/// 30k units, so this yields a few hundred chunks: coarse enough that draw
-/// calls stay low, fine enough that turning around culls most of the map.
-const CHUNK_SIZE: f32 = 1024.0;
+/// Side length of a spatial chunk, in Source units.
+///
+/// gm_construct spans roughly 30k units. At 1024 units the map split into
+/// 1211 chunk meshes, and the per-frame draw call overhead on an Intel UHD 600
+/// cost more than the frustum culling saved. Coarser cells trade a little
+/// culling precision for far fewer draw calls.
+const CHUNK_SIZE: f32 = 6144.0;
 
 type ChunkKey = [i32; 3];
 
@@ -202,28 +205,62 @@ pub fn load_map() -> Option<LoadedMap> {
         }
     }
 
+    // Merge each cell's per-bucket buffers back into a single mesh.
+    //
+    // Keeping the material split per cell would multiply draw calls by the
+    // number of distinct textures touching that cell, which on a 187-texture
+    // map is worse than the culling win. A single material per cell keeps one
+    // draw call per visible cell; the cell's dominant texture is used for its
+    // colour, so a cell still reads as roughly one surface type.
+    let mut cell_buckets: HashMap<usize, usize> = HashMap::new();
     let mut chunk_count = 0_u32;
     let mut meshes: Vec<ChunkMesh> = Vec::new();
 
-    for buckets_in_chunk in chunks.into_values() {
-        for (bucket, chunk) in buckets_in_chunk {
-            let mut mesh = Mesh::new(
-                PrimitiveTopology::TriangleList,
-                RenderAssetUsages::default(),
-            );
-            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, chunk.positions);
-            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, chunk.normals);
-            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, chunk.uvs);
-            meshes.push((bucket, mesh));
-            chunk_count += 1;
+    for (cell, buckets_in_cell) in chunks {
+        let mut total_triangles = 0_usize;
+        let mut dominant_bucket = 0_usize;
+        let mut dominant_triangles = 0_usize;
+
+        for (bucket, buffers) in &buckets_in_cell {
+            let cell_triangles = buffers.positions.len() / 3;
+            total_triangles += cell_triangles;
+            if cell_triangles > dominant_triangles {
+                dominant_triangles = cell_triangles;
+                dominant_bucket = *bucket;
+            }
         }
+
+        let mut positions: Vec<[f32; 3]> = Vec::with_capacity(total_triangles * 3);
+        let mut normals: Vec<[f32; 3]> = Vec::with_capacity(total_triangles * 3);
+        let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(total_triangles * 3);
+
+        for (_, buffers) in buckets_in_cell {
+            positions.extend_from_slice(&buffers.positions);
+            normals.extend_from_slice(&buffers.normals);
+            uvs.extend_from_slice(&buffers.uvs);
+        }
+
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+
+        cell_buckets.insert(cell, dominant_bucket);
+        meshes.push((dominant_bucket, mesh));
+        chunk_count += 1;
     }
 
     println!(
         "[bsp] built {visible_faces} visible faces into {triangles} triangles \
-         across {chunk_count} chunk meshes in {} material buckets \
-         ({flipped_triangles} had reversed winding)",
-        bucket_names.len()
+         across {chunk_count} spatial chunks at {CHUNK_SIZE} units \
+         ({flipped_triangles} had reversed winding)"
+    );
+    println!(
+        "[bsp] {chunk_count} distinct textures used, drawn from {} material buckets",
+        cell_buckets.len()
     );
     // Only the first few buckets are listed: there are hundreds, and dumping
     // them all buries the rest of the startup log.

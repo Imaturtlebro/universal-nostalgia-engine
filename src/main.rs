@@ -1,26 +1,27 @@
-// bevy_diagnostic has no prelude module, so these must be imported explicitly.
+﻿// bevy_diagnostic has no prelude module, so these must be imported explicitly.
 // `bevy_core_pipeline::prelude` only re-exports Camera3d/Camera3dBundle, so
 // Tonemapping (which lives in `core_3d::prelude`) needs an explicit import.
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
-use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::render::settings::{Backends, PowerPreference, RenderCreation, WgpuSettings};
 use bevy::render::RenderPlugin;
-use bevy::window::{CursorGrabMode, PrimaryWindow, WindowResolution};
+use bevy::window::{PrimaryWindow, WindowResolution};
 use std::path::Path;
 use std::time::Instant;
 use vbsp::Vector;
 use vpk::VPK;
 
 mod bsp_world;
-use bsp_world::{find_gmod_dir, LoadedMap};
+mod collision;
+mod player;
+mod spawner;
 
-/// Source units are ~inches (player is 72 units tall), so the flycam moves
-/// much faster than a metre-scale Bevy scene would suggest.
-const FLYCAM_SPEED: f32 = 250.0;
-const FLYCAM_SENSITIVITY: f32 = 0.003;
-const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 * 0.99;
+use bsp_world::{find_gmod_dir, LoadedMap};
+use collision::EYE_HEIGHT;
+use player::Player;
+use spawner::{setup_menu, Spawner};
+
 /// Ambient fill, as a plain multiplier on the ambient colour.
 ///
 /// Bevy does NOT convert this to lux: in `bevy_pbr`'s `prepare_lights` the
@@ -112,12 +113,6 @@ fn check_gmod_assets() {
     }
 }
 
-#[derive(Component, Default)]
-struct Flycam {
-    yaw: f32,
-    pitch: f32,
-}
-
 /// Stand-in colour per texture name, so faces are visually distinguishable
 /// before real .vtf textures are decoded. Replaced by actual textures later.
 fn placeholder_color(texture_name: &str) -> Color {
@@ -140,22 +135,20 @@ fn placeholder_color(texture_name: &str) -> Color {
     }
 }
 
-fn spawn_camera(commands: &mut Commands, position: Vec3, yaw: f32, pitch: f32) {
-    commands.spawn((
-        Camera3dBundle {
-            transform: Transform::from_translation(position),
-            // Without any exposure adaptation, the HDR buffer needs a display
-            // transform or bright surfaces clip to flat white. ACES rolls off
-            // highlights rather than hard-clipping them.
-            tonemapping: Tonemapping::AcesFitted,
-            // Dithering runs per output pixel to hide banding in gradients.
-            // The world is untextured flat colour, so there is no gradient to
-            // band and the per-pixel cost buys nothing.
-            dither: DebandDither::Disabled,
-            ..default()
-        },
-        Flycam { yaw, pitch },
-    ));
+/// Spawns the camera at the player's eye. Orientation and bob are driven every
+/// frame by `player::camera_system`.
+fn spawn_camera(commands: &mut Commands, position: Vec3) {
+    commands.spawn(Camera3dBundle {
+        transform: Transform::from_translation(position),
+        // Without any exposure adaptation, the HDR buffer needs a display
+        // transform or bright surfaces clip to flat white. ACES rolls off
+        // highlights rather than hard-clipping them.
+        tonemapping: Tonemapping::AcesFitted,
+        // Dithering runs per output pixel to hide banding in gradients. The
+        // world is untextured flat colour, so there is no gradient to band.
+        dither: DebandDither::Disabled,
+        ..default()
+    });
 }
 
 /// Builds the loaded Source map if there is one, otherwise falls back to the
@@ -215,11 +208,19 @@ fn setup_scene(
             ));
         }
 
+        commands.spawn((
+            Player {
+                feet: map.spawn_position - Vec3::Y * EYE_HEIGHT,
+                yaw: map.spawn_yaw,
+                pitch: map.spawn_pitch,
+                ..default()
+            },
+            Name::new("player"),
+        ));
+
         spawn_camera(
             &mut commands,
             map.spawn_position,
-            map.spawn_yaw,
-            map.spawn_pitch,
         );
         return;
     }
@@ -239,13 +240,15 @@ fn setup_scene(
         ..default()
     });
 
-    // From (0, 2, 5), pitch is atan(-2/5) to aim at the origin.
-    spawn_camera(
-        &mut commands,
-        Vec3::new(0.0, 2.0, 5.0),
-        0.0,
-        -2.0_f32.atan2(5.0),
-    );
+    commands.spawn((
+        Player {
+            feet: Vec3::new(0.0, 0.0, 5.0),
+            ..default()
+        },
+        Name::new("player"),
+    ));
+
+    spawn_camera(&mut commands, Vec3::new(0.0, EYE_HEIGHT, 5.0));
 }
 
 fn setup_fps_overlay(mut commands: Commands) {
@@ -341,7 +344,7 @@ fn report_render_backend(
 fn count_visible_chunks(
     frustum: Query<&bevy::render::primitives::Frustum, With<Camera3d>>,
     chunks: Query<&bevy::render::primitives::Aabb, With<MapChunk>>,
-    mut stats: ResMut<RenderStats>,
+    stats: Option<ResMut<RenderStats>>,
 ) {
     // `Query::get_single` returns a Result, not an Option.
     let Ok(frustum) = frustum.get_single() else {
@@ -357,7 +360,9 @@ fn count_visible_chunks(
         }
     }
 
-    stats.chunks_visible = visible;
+    if let Some(mut stats) = stats {
+        stats.chunks_visible = visible;
+    }
 }
 
 /// One-line performance summary printed to the console a couple of seconds in.
@@ -435,7 +440,7 @@ fn cull_chunks(
     mut chunks: Query<(&MapChunk, &mut Visibility), With<MapChunk>>,
     map: Option<Res<LoadedMap>>,
     mut cache: Local<PvsCache>,
-    mut stats: ResMut<RenderStats>,
+    stats: Option<ResMut<RenderStats>>,
 ) {
     let Ok(camera) = camera.get_single() else {
         return;
@@ -498,7 +503,9 @@ fn cull_chunks(
         }
     }
 
-    stats.chunks_in_pvs = drawn;
+    if let Some(mut stats) = stats {
+        stats.chunks_in_pvs = drawn;
+    }
 }
 
 fn main() {
@@ -534,6 +541,21 @@ fn main() {
             chunks_visible: 0,
             chunks_in_pvs: 0,
         });
+
+        // Collision and the spawner both need the parsed BSP, so they are built
+        // here rather than inside a startup system.
+        app.insert_resource(player::build_collision_resource(&map.bsp));
+
+        let entities = spawner::collect_spawnables(&map.bsp);
+        println!(
+            "[spawner] {} spawnable entities in the map",
+            entities.len()
+        );
+        app.insert_resource(Spawner {
+            entities,
+            ..default()
+        });
+
         app.insert_resource(map);
     }
 
@@ -569,16 +591,28 @@ fn main() {
         )
         .add_systems(
             Startup,
-            (setup_scene, setup_fps_overlay, report_render_backend).chain(),
+            (
+                setup_scene,
+                setup_fps_overlay,
+                setup_menu,
+                report_render_backend,
+            )
+                .chain(),
         )
         // The overlay and console read the stats, so the cull count has to land
-        // before them in the same frame.
+        // before them in the same frame. Player look must run before movement
+        // so a frame's mouse motion steers the same frame's step, and the
+        // camera system runs last so bob and lean land on the final position.
         .add_systems(
             Update,
             (
-                flycam_system,
+                player::look_system,
+                player::move_system,
                 cull_chunks,
                 count_visible_chunks,
+                player::camera_system,
+                spawner::menu_system,
+                spawner::update_menu_text,
                 update_fps_overlay,
                 log_startup_stats,
             )
@@ -586,80 +620,4 @@ fn main() {
         );
 
     app.run();
-}
-
-fn flycam_system(
-    time: Res<Time<()>>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mouse_buttons: Res<ButtonInput<MouseButton>>,
-    mut mouse_motion: EventReader<MouseMotion>,
-    mut windows: Query<&mut Window, With<PrimaryWindow>>,
-    mut cameras: Query<(&mut Transform, &mut Flycam), With<Camera3d>>,
-) {
-    for mut window in &mut windows {
-        let release = mouse_buttons.just_released(MouseButton::Right)
-            || keyboard.just_pressed(KeyCode::Escape);
-
-        if release {
-            window.cursor.grab_mode = CursorGrabMode::None;
-            window.cursor.visible = true;
-        }
-
-        if mouse_buttons.just_pressed(MouseButton::Right) {
-            window.cursor.grab_mode = CursorGrabMode::Locked;
-            window.cursor.visible = false;
-        }
-    }
-
-    let look_enabled = mouse_buttons.pressed(MouseButton::Right);
-    let mut motion = Vec2::ZERO;
-    for event in mouse_motion.read() {
-        motion += event.delta;
-    }
-    if !look_enabled {
-        motion = Vec2::ZERO;
-    }
-
-    let mut direction = Vec3::ZERO;
-    if keyboard.pressed(KeyCode::KeyW) {
-        direction += Vec3::Z;
-    }
-    if keyboard.pressed(KeyCode::KeyS) {
-        direction -= Vec3::Z;
-    }
-    if keyboard.pressed(KeyCode::KeyA) {
-        direction -= Vec3::X;
-    }
-    if keyboard.pressed(KeyCode::KeyD) {
-        direction += Vec3::X;
-    }
-    if keyboard.pressed(KeyCode::Space) {
-        direction += Vec3::Y;
-    }
-    if keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight) {
-        direction -= Vec3::Y;
-    }
-
-    for (mut transform, mut flycam) in &mut cameras {
-        if motion != Vec2::ZERO {
-            flycam.yaw -= motion.x * FLYCAM_SENSITIVITY;
-            flycam.pitch = (flycam.pitch - motion.y * FLYCAM_SENSITIVITY)
-                .clamp(-MAX_PITCH, MAX_PITCH);
-        }
-
-        // Rebuilt from yaw/pitch every frame, so roll can never accumulate.
-        transform.rotation =
-            Quat::from_euler(EulerRot::YXZ, flycam.yaw, flycam.pitch, 0.0);
-
-        if direction != Vec3::ZERO {
-            let forward = transform.forward();
-            let right = transform.right();
-            let motion_direction =
-                forward * direction.z + right * direction.x + Vec3::Y * direction.y;
-
-            transform.translation += motion_direction.normalize_or_zero()
-                * FLYCAM_SPEED
-                * time.delta_seconds();
-        }
-    }
 }

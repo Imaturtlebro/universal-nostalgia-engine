@@ -14,6 +14,7 @@ const GMOD_ASSET_DIRS: [&str; 2] = [
 
 const FLYCAM_SPEED: f32 = 5.0;
 const FLYCAM_SENSITIVITY: f32 = 0.003;
+const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 * 0.99;
 
 fn find_gmod_dir() -> Option<PathBuf> {
     GMOD_ASSET_DIRS
@@ -96,6 +97,12 @@ fn check_gmod_assets() {
 #[derive(Component)]
 struct RotatableCube;
 
+#[derive(Component, Default)]
+struct Flycam {
+    yaw: f32,
+    pitch: f32,
+}
+
 fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -119,10 +126,20 @@ fn setup_scene(
         ..default()
     });
 
-    commands.spawn(Camera3dBundle {
-        transform: Transform::from_xyz(0.0, 2.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
-        ..default()
-    });
+    // From (0, 2, 5), pitch is atan(-2/5) to aim at the origin.
+    let spawn_position = Vec3::new(0.0, 2.0, 5.0);
+    let spawn_pitch = -2.0_f32.atan2(5.0);
+
+    commands.spawn((
+        Camera3dBundle {
+            transform: Transform::from_translation(spawn_position),
+            ..default()
+        },
+        Flycam {
+            yaw: 0.0,
+            pitch: spawn_pitch,
+        },
+    ));
 
     commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
@@ -183,7 +200,7 @@ fn flycam_system(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mut mouse_motion: EventReader<MouseMotion>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
-    mut cameras: Query<&mut Transform, With<Camera3d>>,
+    mut cameras: Query<(&mut Transform, &mut Flycam), With<Camera3d>>,
 ) {
     for mut window in &mut windows {
         let release = mouse_buttons.just_released(MouseButton::Right)
@@ -217,10 +234,10 @@ fn flycam_system(
         direction -= Vec3::Z;
     }
     if keyboard.pressed(KeyCode::KeyA) {
-        direction += Vec3::X;
+        direction -= Vec3::X;
     }
     if keyboard.pressed(KeyCode::KeyD) {
-        direction -= Vec3::X;
+        direction += Vec3::X;
     }
     if keyboard.pressed(KeyCode::Space) {
         direction += Vec3::Y;
@@ -229,20 +246,26 @@ fn flycam_system(
         direction -= Vec3::Y;
     }
 
-    for mut camera in &mut cameras {
+    for (mut transform, mut flycam) in &mut cameras {
         if motion != Vec2::ZERO {
-            camera.rotate_y(-motion.x * FLYCAM_SENSITIVITY);
-            camera.rotate_x(-motion.y * FLYCAM_SENSITIVITY);
+            flycam.yaw -= motion.x * FLYCAM_SENSITIVITY;
+            flycam.pitch = (flycam.pitch - motion.y * FLYCAM_SENSITIVITY)
+                .clamp(-MAX_PITCH, MAX_PITCH);
         }
 
+        // Rebuilt from yaw/pitch every frame, so roll can never accumulate.
+        transform.rotation =
+            Quat::from_euler(EulerRot::YXZ, flycam.yaw, flycam.pitch, 0.0);
+
         if direction != Vec3::ZERO {
-            let forward = camera.forward();
-            let right = camera.right();
+            let forward = transform.forward();
+            let right = transform.right();
             let motion_direction =
                 forward * direction.z + right * direction.x + Vec3::Y * direction.y;
 
-            camera.translation +=
-                motion_direction.normalize_or_zero() * FLYCAM_SPEED * time.delta_seconds();
+            transform.translation += motion_direction.normalize_or_zero()
+                * FLYCAM_SPEED
+                * time.delta_seconds();
         }
     }
 }

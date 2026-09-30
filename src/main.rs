@@ -115,18 +115,21 @@ fn setup_scene(
     });
 
     if let Some(map) = map {
+        // Backface culling is now safe because the mesh builder normalises
+        // triangle winding against each face's plane normal.
         let material = materials.add(StandardMaterial {
             base_color: Color::rgb(0.65, 0.65, 0.68),
             perceptual_roughness: 0.9,
-            cull_mode: None,
             ..default()
         });
 
-        commands.spawn(PbrBundle {
-            mesh: meshes.add(map.mesh.clone()),
-            material,
-            ..default()
-        });
+        for chunk in &map.chunks {
+            commands.spawn(PbrBundle {
+                mesh: meshes.add(chunk.clone()),
+                material: material.clone(),
+                ..default()
+            });
+        }
 
         spawn_camera(
             &mut commands,
@@ -173,6 +176,9 @@ fn main() {
 
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::rgb(0.1, 0.2, 0.4)))
+        // MSAA off: in Bevy 0.13 Msaa is a Resource, not a camera component.
+        // 4x multisampling costs fill rate the Intel UHD 600 cannot spare.
+        .insert_resource(Msaa::Off)
         .insert_resource(AmbientLight {
             color: Color::WHITE,
             brightness: AMBIENT_BRIGHTNESS,

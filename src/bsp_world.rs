@@ -1,5 +1,5 @@
-use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
+use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::PrimitiveTopology;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -151,7 +151,7 @@ fn find_spawn_point(bsp: &Bsp) -> (Vec3, f32, f32) {
         // Source entity angles are (pitch, yaw, roll), all in degrees.
         let (pitch, yaw) = entity
             .prop("angles")
-            .map(parse_vec3)
+            .and_then(parse_vec3)
             .map(|[pitch, yaw, _]| (pitch, yaw))
             .unwrap_or((0.0, 0.0));
 

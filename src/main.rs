@@ -1,4 +1,6 @@
 use bevy::prelude::*;
+use bevy::render::settings::{Backends, PowerPreference, RenderCreation, WgpuSettings};
+use bevy::render::RenderPlugin;
 use std::path::{Path, PathBuf};
 
 const GMOD_ASSET_DIRS: [&str; 2] = [
@@ -48,12 +50,17 @@ fn setup_scene(
         .spawn((
             PbrBundle {
                 mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-                material: materials.add(Color::rgb(0.6, 0.7, 1.0)),
+                material: materials.add(Color::rgb(0.8, 0.2, 0.2)),
                 transform: Transform::from_xyz(0.0, 0.5, 0.0),
                 ..default()
             },
             RotatableCube,
         ));
+
+    commands.spawn(Camera3dBundle {
+        transform: Transform::from_xyz(0.0, 2.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ..default()
+    });
 
     commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
@@ -71,15 +78,30 @@ fn main() {
     check_gmod_assets();
 
     App::new()
-        .insert_resource(ClearColor(Color::rgb(0.05, 0.05, 0.08)))
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Universal Nostalgia Engine".to_string(),
-                resolution: (1280.0_f32, 720.0_f32).into(),
-                ..default()
-            }),
-            ..default()
-        }))
+        .insert_resource(ClearColor(Color::rgb(0.1, 0.2, 0.4)))
+        .insert_resource(AmbientLight {
+            color: Color::WHITE,
+            brightness: 500.0,
+        })
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Universal Nostalgia Engine".to_string(),
+                        resolution: (1280.0_f32, 720.0_f32).into(),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(RenderPlugin {
+                    render_creation: RenderCreation::Automatic(WgpuSettings {
+                        backends: Some(Backends::DX12 | Backends::VULKAN),
+                        power_preference: PowerPreference::HighPerformance,
+                        ..default()
+                    }),
+                    synchronous_pipeline_compilation: true,
+                }),
+        )
         .add_systems(Startup, setup_scene)
         .add_systems(Update, rotate_cube)
         .run();

@@ -36,17 +36,24 @@ fn check_gmod_assets() {
     }
 }
 
+#[derive(Component)]
+struct RotatableCube;
+
 fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    commands.spawn(PbrBundle {
-        mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-        material: materials.add(Color::rgb(0.6, 0.7, 1.0)),
-        transform: Transform::from_xyz(0.0, 0.5, 0.0),
-        ..default()
-    });
+    commands
+        .spawn((
+            PbrBundle {
+                mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+                material: materials.add(Color::rgb(0.6, 0.7, 1.0)),
+                transform: Transform::from_xyz(0.0, 0.5, 0.0),
+                ..default()
+            },
+            RotatableCube,
+        ));
 
     commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
@@ -68,7 +75,7 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Universal Nostalgia Engine".to_string(),
-                resolution: (1280.0, 720.0).into(),
+                resolution: (1280.0_f32, 720.0_f32).into(),
                 ..default()
             }),
             ..default()
@@ -78,7 +85,7 @@ fn main() {
         .run();
 }
 
-fn rotate_cube(mut query: Query<&mut Transform, With<Mesh3d>>) {
+fn rotate_cube(mut query: Query<&mut Transform, With<RotatableCube>>) {
     for mut transform in &mut query {
         transform.rotate_y(0.3 * 0.016);
         transform.rotate_x(0.2 * 0.016);

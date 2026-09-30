@@ -86,6 +86,28 @@ struct Flycam {
     pitch: f32,
 }
 
+/// Stand-in colour per texture name, so faces are visually distinguishable
+/// before real .vtf textures are decoded. Replaced by actual textures later.
+fn placeholder_color(texture_name: &str) -> Color {
+    if texture_name.contains("grass") || texture_name.contains("dirt") {
+        Color::rgb(0.25, 0.42, 0.16)
+    } else if texture_name.contains("brick") {
+        Color::rgb(0.48, 0.22, 0.16)
+    } else if texture_name.contains("concrete") {
+        Color::rgb(0.45, 0.45, 0.44)
+    } else if texture_name.contains("plaster") || texture_name.contains("wall") {
+        Color::rgb(0.76, 0.72, 0.64)
+    } else if texture_name.contains("metal") {
+        Color::rgb(0.40, 0.42, 0.46)
+    } else if texture_name.contains("wood") {
+        Color::rgb(0.44, 0.30, 0.18)
+    } else if texture_name.contains("glass") {
+        Color::rgb(0.60, 0.72, 0.80)
+    } else {
+        Color::rgb(0.62, 0.62, 0.65)
+    }
+}
+
 fn spawn_camera(commands: &mut Commands, position: Vec3, yaw: f32, pitch: f32) {
     commands.spawn((
         Camera3dBundle {
@@ -117,16 +139,22 @@ fn setup_scene(
     if let Some(map) = map {
         // Backface culling is now safe because the mesh builder normalises
         // triangle winding against each face's plane normal.
-        let material = materials.add(StandardMaterial {
-            base_color: Color::rgb(0.65, 0.65, 0.68),
-            perceptual_roughness: 0.9,
-            ..default()
-        });
+        let materials: Vec<Handle<StandardMaterial>> = map
+            .bucket_names
+            .iter()
+            .map(|name| {
+                materials.add(StandardMaterial {
+                    base_color: placeholder_color(name),
+                    perceptual_roughness: 0.9,
+                    ..default()
+                })
+            })
+            .collect();
 
-        for chunk in &map.chunks {
+        for (bucket, chunk) in &map.chunks {
             commands.spawn(PbrBundle {
                 mesh: meshes.add(chunk.clone()),
-                material: material.clone(),
+                material: materials[*bucket].clone(),
                 ..default()
             });
         }
@@ -164,6 +192,116 @@ fn setup_scene(
     );
 }
 
+fn setup_fps_overlay(mut commands: Commands) {
+    commands.spawn((
+        // A plain text bundle has no background, so give it a dark panel to
+        // stay readable against bright walls.
+        NodeBundle {
+            style: Style {
+                position_type: PositionType::Absolute,
+                top: Val::Px(8.0),
+                left: Val::Px(8.0),
+                padding: UiRect::all(Val::Px(6.0)),
+                ..default()
+            },
+            background_color: Color::rgba(0.0, 0.0, 0.0, 0.55).into(),
+            ..default()
+        },
+        TextBundle::from_section(
+            "measuring...",
+            TextStyle {
+                font_size: 20.0,
+                color: Color::WHITE,
+                ..default()
+            },
+        ),
+        FpsText,
+    ));
+}
+
+#[derive(Component)]
+struct FpsText;
+
+#[derive(Resource, Default)]
+struct RenderStats {
+    /// Chunk meshes in the loaded map, known at load time.
+    chunks_total: usize,
+    triangles_total: usize,
+}
+
+fn update_fps_overlay(
+    diagnostics: Diagnostics,
+    mut fps_text: Query<&mut Text, With<FpsText>>,
+    stats: Option<Res<RenderStats>>,
+) {
+    let Ok(mut text) = fps_text.get_single_mut() else {
+        return;
+    };
+
+    let Some(diagnostic) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) else {
+        return;
+    };
+    let Some(fps) = diagnostic.smoothed() else {
+        return;
+    };
+
+    let mut line = format!("{fps:.1} fps");
+    if let Some(stats) = stats {
+        line.push_str(&format!(
+            "  map chunks {}  drawn tris {}",
+            stats.chunks_total,
+            stats.triangles_total
+        ));
+    }
+    text.sections[0].value = line;
+}
+
+/// The adapter/backend Bevy actually chose. Logged because the backend is
+/// negotiated at runtime and can differ from what we requested.
+fn report_render_backend(
+    adapter: Res<bevy::render::renderer::RenderAdapterInfo>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+) {
+    println!(
+        "[perf] active backend: {:?} (vendor {:?}, device {:?}, driver {:?})",
+        adapter.0.backend, adapter.0.vendor, adapter.0.device, adapter.0.driver
+    );
+    for window in &windows {
+        println!(
+            "[perf] primary window: {}x{} physical, scale {:?}",
+            window.physical_width(),
+            window.physical_height(),
+            window.scale_factor()
+        );
+    }
+}
+
+/// One-line performance summary printed to the console a couple of seconds in.
+fn log_startup_stats(diagnostics: Diagnostics, mut done: Local<bool>) {
+    if *done {
+        return;
+    }
+
+    let Some(diagnostic) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) else {
+        return;
+    };
+    if diagnostic.history.len() < 120 {
+        return;
+    }
+    *done = true;
+
+    println!("[perf] ---- startup performance summary ----");
+    if let Some(fps) = diagnostic.average() {
+        println!("[perf] average fps over first ~2s: {fps:.1}");
+    }
+    if let Some(frame_time) = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
+        .and_then(|d| d.average())
+    {
+        println!("[perf] average frame time: {frame_time:.2} ms");
+    }
+}
+
 fn main() {
     println!("universal-nostalgia-engine {} starting", env!("CARGO_PKG_VERSION"));
     check_gmod_assets();
@@ -185,10 +323,21 @@ fn main() {
         });
 
     if let Some(map) = map {
+        println!(
+            "[scene] world ready: {} chunk meshes, {} triangles, {} material buckets",
+            map.chunks.len(),
+            map.triangles_total,
+            map.bucket_names.len()
+        );
+        app.insert_resource(RenderStats {
+            chunks_total: map.chunks.len(),
+            triangles_total: map.triangles_total,
+        });
         app.insert_resource(map);
     }
 
-    app.add_plugins(
+    app.add_plugins(FrameTimeDiagnosticsPlugin::default())
+        .add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
                 primary_window: Some(Window {
@@ -207,8 +356,24 @@ fn main() {
                 synchronous_pipeline_compilation: true,
             }),
         )
-        .add_systems(Startup, setup_scene)
-        .add_systems(Update, flycam_system)
+        .add_systems(
+            Startup,
+            (
+                setup_scene,
+                setup_fps_overlay,
+                report_render_backend,
+            )
+                .chain(),
+        )
+        .add_systems(
+            Update,
+            (
+                update_fps_overlay,
+                log_startup_stats,
+                flycam_system,
+            )
+                .chain(),
+        )
         .run();
 }
 

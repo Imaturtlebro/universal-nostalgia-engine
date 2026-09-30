@@ -4,7 +4,7 @@ use bevy::render::render_resource::PrimitiveTopology;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
-use vbsp::Bsp;
+use vbsp::{Bsp, Vector};
 
 const MAP_NAME: &str = "gm_construct.bsp";
 const GMOD_ASSET_DIRS: [&str; 2] = [
@@ -15,9 +15,16 @@ const GMOD_ASSET_DIRS: [&str; 2] = [
 /// Source view height above `info_player_start` origin.
 const PLAYER_EYE_HEIGHT: f32 = 64.0;
 
+/// One draw-call group: a chunk mesh plus the index of the material bucket
+/// whose texture name it was grouped by.
+pub type ChunkMesh = (usize, Mesh);
+
 #[derive(Resource)]
 pub struct LoadedMap {
-    pub chunks: Vec<Mesh>,
+    pub chunks: Vec<ChunkMesh>,
+    /// Lowercased texture name per material bucket index.
+    pub bucket_names: Vec<String>,
+    pub triangles_total: usize,
     pub spawn_position: Vec3,
     pub spawn_yaw: f32,
     pub spawn_pitch: f32,
@@ -51,6 +58,7 @@ type ChunkKey = [i32; 3];
 struct ChunkBuffers {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
 }
 
 fn chunk_key(center: Vec3) -> ChunkKey {
@@ -118,13 +126,17 @@ pub fn load_map() -> Option<LoadedMap> {
         world.mins, world.maxs
     );
 
-    // Bucket every triangle into a spatial grid cell so each cell becomes its
-    // own mesh entity. Bevy derives a Mesh's Aabb from its vertices, so
-    // separate entities let the renderer frustum-cull chunks it cannot see.
-    let mut chunks: HashMap<ChunkKey, ChunkBuffers> = HashMap::new();
+    // Bucket every triangle into a spatial grid cell, keyed by material bucket,
+    // so each cell becomes its own mesh entity. Bevy derives a Mesh's Aabb from
+    // its vertices, so separate entities let the renderer frustum-cull chunks
+    // it cannot see. Keying by material too keeps a single draw call per
+    // (chunk, material) pair instead of one per triangle.
+    let mut chunks: HashMap<ChunkKey, HashMap<usize, ChunkBuffers>> = HashMap::new();
     let mut visible_faces = 0_u32;
     let mut triangles = 0_u32;
     let mut flipped_triangles = 0_u32;
+    let mut buckets: HashMap<String, usize> = HashMap::new();
+    let mut bucket_names: Vec<String> = Vec::new();
 
     for face in world.faces() {
         if !face.is_visible() {
@@ -135,11 +147,33 @@ pub fn load_map() -> Option<LoadedMap> {
         let plane_normal = face.normal();
         let normal = source_to_bevy([plane_normal.x, plane_normal.y, plane_normal.z]);
 
+        // texinfo holds the projection axes used to derive UVs; the texture
+        // name it points at decides which material bucket this face lands in.
+        let texture = face.texture();
+        let texture_name = texture.name().to_ascii_lowercase();
+        let bucket = *buckets.entry(texture_name.clone()).or_insert_with(|| {
+            bucket_names.push(texture_name.clone());
+            bucket_names.len() - 1
+        });
+
         for triangle in face.triangulate() {
+            // UVs are computed from the *Source* position: the texinfo
+            // projection matrices are defined in Source's coordinate space.
+            let mut source_corners = [
+                [triangle[0].x, triangle[0].y, triangle[0].z],
+                [triangle[1].x, triangle[1].y, triangle[1].z],
+                [triangle[2].x, triangle[2].y, triangle[2].z],
+            ];
+            let mut uvs = [
+                texture.uv(Vector::from(source_corners[0])),
+                texture.uv(Vector::from(source_corners[1])),
+                texture.uv(Vector::from(source_corners[2])),
+            ];
+
             let mut corners = [
-                source_to_bevy([triangle[0].x, triangle[0].y, triangle[0].z]),
-                source_to_bevy([triangle[1].x, triangle[1].y, triangle[1].z]),
-                source_to_bevy([triangle[2].x, triangle[2].y, triangle[2].z]),
+                source_to_bevy(source_corners[0]),
+                source_to_bevy(source_corners[1]),
+                source_to_bevy(source_corners[2]),
             ];
 
             // The BSP does not guarantee a consistent winding order, so derive
@@ -147,38 +181,53 @@ pub fn load_map() -> Option<LoadedMap> {
             // (which points outwards), otherwise swap two corners.
             if geometric_normal(corners).dot(Vec3::from(normal)) < 0.0 {
                 corners.swap(1, 2);
+                source_corners.swap(1, 2);
+                uvs.swap(1, 2);
                 flipped_triangles += 1;
             }
 
             let key = chunk_key(triangle_center(corners));
-            let chunk = chunks.entry(key).or_default();
+            let chunk = chunks
+                .entry(key)
+                .or_default()
+                .entry(bucket)
+                .or_default();
 
-            for corner in corners {
+            for (index, corner) in corners.into_iter().enumerate() {
                 chunk.positions.push(corner);
                 chunk.normals.push(normal);
+                chunk.uvs.push(uvs[index]);
             }
             triangles += 1;
         }
     }
 
-    let meshes: Vec<Mesh> = chunks
-        .into_values()
-        .map(|chunk| {
+    let mut chunk_count = 0_u32;
+    let mut meshes: Vec<ChunkMesh> = Vec::new();
+
+    for buckets_in_chunk in chunks.into_values() {
+        for (bucket, chunk) in buckets_in_chunk {
             let mut mesh = Mesh::new(
                 PrimitiveTopology::TriangleList,
                 RenderAssetUsages::default(),
             );
             mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, chunk.positions);
             mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, chunk.normals);
-            mesh
-        })
-        .collect();
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, chunk.uvs);
+            meshes.push((bucket, mesh));
+            chunk_count += 1;
+        }
+    }
 
     println!(
         "[bsp] built {visible_faces} visible faces into {triangles} triangles \
-         across {} spatial chunks ({flipped_triangles} had reversed winding)",
-        meshes.len()
+         across {chunk_count} chunk meshes in {} material buckets \
+         ({flipped_triangles} had reversed winding)",
+        bucket_names.len()
     );
+    for (index, name) in bucket_names.iter().enumerate() {
+        println!("[bsp]   material {index}: {name}");
+    }
 
     let (spawn_position, spawn_yaw, spawn_pitch) = find_spawn_point(&bsp);
 
@@ -189,6 +238,8 @@ pub fn load_map() -> Option<LoadedMap> {
 
     Some(LoadedMap {
         chunks: meshes,
+        bucket_names,
+        triangles_total: triangles as usize,
         spawn_position,
         spawn_yaw,
         spawn_pitch,

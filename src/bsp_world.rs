@@ -225,8 +225,16 @@ pub fn load_map() -> Option<LoadedMap> {
          ({flipped_triangles} had reversed winding)",
         bucket_names.len()
     );
-    for (index, name) in bucket_names.iter().enumerate() {
+    // Only the first few buckets are listed: there are hundreds, and dumping
+    // them all buries the rest of the startup log.
+    for (index, name) in bucket_names.iter().take(10).enumerate() {
         println!("[bsp]   material {index}: {name}");
+    }
+    if bucket_names.len() > 10 {
+        println!(
+            "[bsp]   ... and {} more material buckets",
+            bucket_names.len() - 10
+        );
     }
 
     let (spawn_position, spawn_yaw, spawn_pitch) = find_spawn_point(&bsp);

@@ -195,30 +195,26 @@ fn setup_scene(
 }
 
 fn setup_fps_overlay(mut commands: Commands) {
-    commands.spawn((
-        // A plain text bundle has no background, so give it a dark panel to
-        // stay readable against bright walls.
-        NodeBundle {
-            style: Style {
-                position_type: PositionType::Absolute,
-                top: Val::Px(8.0),
-                left: Val::Px(8.0),
-                padding: UiRect::all(Val::Px(6.0)),
-                ..default()
-            },
-            background_color: Color::rgba(0.0, 0.0, 0.0, 0.55).into(),
+    // TextBundle already contains Node, Style, BackgroundColor and the
+    // visibility components, so it is configured directly rather than nesting
+    // a NodeBundle inside it, which is a duplicate-component panic.
+    //
+    // The dark background keeps the readout legible against bright walls.
+    let mut bundle = TextBundle::from_section(
+        "measuring...",
+        TextStyle {
+            font_size: 20.0,
+            color: Color::WHITE,
             ..default()
         },
-        TextBundle::from_section(
-            "measuring...",
-            TextStyle {
-                font_size: 20.0,
-                color: Color::WHITE,
-                ..default()
-            },
-        ),
-        FpsText,
-    ));
+    );
+    bundle.style.position_type = PositionType::Absolute;
+    bundle.style.top = Val::Px(8.0);
+    bundle.style.left = Val::Px(8.0);
+    bundle.style.padding = UiRect::all(Val::Px(6.0));
+    bundle.background_color = Color::rgba(0.0, 0.0, 0.0, 0.55).into();
+
+    commands.spawn((bundle, FpsText));
 }
 
 #[derive(Component)]

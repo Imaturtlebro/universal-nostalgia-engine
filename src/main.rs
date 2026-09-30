@@ -17,7 +17,15 @@ use bsp_world::{find_gmod_dir, LoadedMap};
 const FLYCAM_SPEED: f32 = 250.0;
 const FLYCAM_SENSITIVITY: f32 = 0.003;
 const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 * 0.99;
-const AMBIENT_BRIGHTNESS: f32 = 250.0;
+/// Ambient fill. Kept low so the directional light defines the shading and
+/// faces pointing away from it do not go fully black. This is a plain
+/// multiplier, not a lux value.
+const AMBIENT_BRIGHTNESS: f32 = 0.4;
+
+/// Direct sunlight in lux, matching Bevy's own
+/// `light_consts::lux::DIRECT_SUNLIGHT`. Bevy 0.13 switched lights to physical
+/// units, so this is ~100000 rather than the old arbitrary 10000.
+const SUN_ILLUMINANCE: f32 = 100_000.0;
 
 /// Internal render scale. 1.0 renders at the window's 1280x720; lower values
 /// render smaller and upscale, trading sharpness for fill rate.
@@ -132,34 +140,31 @@ fn setup_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    // Sun aimed down the -X/+Y diagonal for face-to-face contrast. Shadows stay
+    // off: a 30k-unit map on an Intel UHD 600 cannot afford a shadow cascade
+    // that large.
     commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
-            illuminance: 10_000.0,
+            illuminance: SUN_ILLUMINANCE,
             shadows_enabled: false,
             ..default()
         },
-        transform: Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
+        // Directional lights emit along their local -Z, so this points
+        // (-1, -1, 0) after the look_at, i.e. down and to the left.
+        transform: Transform::from_xyz(-1.0, 1.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
         ..default()
     });
 
     if let Some(map) = map {
         // Backface culling is now safe because the mesh builder normalises
         // triangle winding against each face's plane normal.
-        // `unlit` skips the whole PBR fragment path (lights, roughness,
-        // ambient, dither). The audit shows frame time scaling with screen
-        // coverage, i.e. a fill-rate problem, so simplifying the fragment
-        // shader is the highest-value change.
-        //
-        // Cost: per-face shading is lost, so the map reads flat until the
-        // BSP lightmaps (LUMP_LIGHTING) are decoded, which is the proper fix
-        // for baked lighting anyway. Directional light shadows are already off.
         let materials: Vec<Handle<StandardMaterial>> = map
             .bucket_names
             .iter()
             .map(|name| {
                 materials.add(StandardMaterial {
                     base_color: placeholder_color(name),
-                    unlit: true,
+                    perceptual_roughness: 0.95,
                     ..default()
                 })
             })

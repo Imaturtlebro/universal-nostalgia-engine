@@ -159,32 +159,41 @@ pub fn load_map() -> Option<LoadedMap> {
             bucket_names.len() - 1
         });
 
-        for triangle in face.triangulate() {
+        // `vertex_positions` (not `triangulate`) is required here: it handles
+        // displacement faces by walking the displacement grid, whereas
+        // `triangulate` would treat a grid as a plain triangle fan and produce
+        // long stretched spikes. It yields a flat stream, so regroup into
+        // triangles.
+        let mut pending: Vec<[f32; 3]> = Vec::with_capacity(3);
+
+        for vertex in face.vertex_positions() {
+            pending.push([vertex.x, vertex.y, vertex.z]);
+            if pending.len() < 3 {
+                continue;
+            }
+            let triangle = [pending[0], pending[1], pending[2]];
+            pending.clear();
+
             // UVs are computed from the *Source* position: the texinfo
             // projection matrices are defined in Source's coordinate space.
-            let mut source_corners = [
-                [triangle[0].x, triangle[0].y, triangle[0].z],
-                [triangle[1].x, triangle[1].y, triangle[1].z],
-                [triangle[2].x, triangle[2].y, triangle[2].z],
-            ];
             let mut uvs = [
-                texture.uv(Vector::from(source_corners[0])),
-                texture.uv(Vector::from(source_corners[1])),
-                texture.uv(Vector::from(source_corners[2])),
+                texture.uv(Vector::from(triangle[0])),
+                texture.uv(Vector::from(triangle[1])),
+                texture.uv(Vector::from(triangle[2])),
             ];
-
             let mut corners = [
-                source_to_bevy(source_corners[0]),
-                source_to_bevy(source_corners[1]),
-                source_to_bevy(source_corners[2]),
+                source_to_bevy(triangle[0]),
+                source_to_bevy(triangle[1]),
+                source_to_bevy(triangle[2]),
             ];
 
-            // The BSP does not guarantee a consistent winding order, so derive
+            // Source does not guarantee one consistent winding order, so derive
             // it: the geometric normal must agree with the face plane normal
-            // (which points outwards), otherwise swap two corners.
+            // (which points outwards), otherwise swap two corners. This is a
+            // per-triangle orientation fix, not a change to which vertices
+            // belong to the face, so it cannot distort geometry.
             if geometric_normal(corners).dot(Vec3::from(normal)) < 0.0 {
                 corners.swap(1, 2);
-                source_corners.swap(1, 2);
                 uvs.swap(1, 2);
                 flipped_triangles += 1;
             }

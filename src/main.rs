@@ -1,5 +1,5 @@
 // bevy_diagnostic has no prelude module, so these must be imported explicitly.
-use bevy::diagnostic::{Diagnostics, FrameTimeDiagnosticsPlugin};
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::render::settings::{Backends, PowerPreference, RenderCreation, WgpuSettings};
@@ -232,7 +232,7 @@ struct RenderStats {
 }
 
 fn update_fps_overlay(
-    diagnostics: Diagnostics,
+    diagnostics: Res<DiagnosticsStore>,
     mut fps_text: Query<&mut Text, With<FpsText>>,
     stats: Option<Res<RenderStats>>,
 ) {
@@ -279,7 +279,7 @@ fn report_render_backend(
 }
 
 /// One-line performance summary printed to the console a couple of seconds in.
-fn log_startup_stats(diagnostics: Diagnostics, mut done: Local<bool>) {
+fn log_startup_stats(diagnostics: Res<DiagnosticsStore>, mut done: Local<bool>) {
     if *done {
         return;
     }
@@ -287,7 +287,7 @@ fn log_startup_stats(diagnostics: Diagnostics, mut done: Local<bool>) {
     let Some(diagnostic) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) else {
         return;
     };
-    if diagnostic.history.len() < 120 {
+    if diagnostic.history_len() < 120 {
         return;
     }
     *done = true;

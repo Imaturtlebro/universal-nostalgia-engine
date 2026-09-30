@@ -24,22 +24,24 @@ const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 * 0.99;
 ///
 /// Bevy does NOT convert this to lux: in `bevy_pbr`'s `prepare_lights` the
 /// ambient contribution is `color * brightness`, pre-multiplied exactly like
-/// the directional light's `color * illuminance`. So these two values are
-/// directly comparable, and their ratio is the scene's contrast ratio.
-const AMBIENT_BRIGHTNESS: f32 = 0.3;
+/// the directional light's `color * illuminance`. So the ratio between the two
+/// constants below is the scene's contrast ratio.
+const AMBIENT_BRIGHTNESS: f32 = 80.0;
 
-/// Sun strength, deliberately far below physical `DIRECT_SUNLIGHT` (100000).
+/// Sun strength, matching Bevy's own `DirectionalLight` default
+/// (`light_consts::lux::AMBIENT_DAYLIGHT`).
 ///
-/// Physically-scaled light only makes sense with an auto-exposure pipeline,
-/// which we do not have. At a true 100000 the ratio against ambient below
-/// 100000:1 and every face turned away from the sun renders pure black while
-/// lit faces blow out to white. 3.0 keeps the sun dominant but leaves the
-/// ambient able to fill shadowed faces.
-const SUN_ILLUMINANCE: f32 = 3.0;
+/// This is deliberately NOT `DIRECT_SUNLIGHT` (100000). Physically-scaled light
+/// only balances out with an auto-exposure pipeline, which we do not have, and
+/// pairing 100000 with a sane ambient gives a ~1250:1 ratio where every face
+/// turned away from the sun renders pure black. 10000 against ambient 80 is
+/// Bevy's own 125:1 default, which renders correctly.
+const SUN_ILLUMINANCE: f32 = 10_000.0;
 
-/// Internal render scale. 1.0 renders at the window's 1280x720; lower values
-/// render smaller and upscale, trading sharpness for fill rate.
-const RENDER_SCALE: f32 = 0.75;
+/// Window size in physical pixels. Lowering these is the way to trade sharpness
+/// for fill rate; the renderer scales the result to the window.
+const WINDOW_WIDTH: f32 = 1280.0;
+const WINDOW_HEIGHT: f32 = 720.0;
 
 fn inspect_vpk_archive() {
     let Some(gmod_dir) = find_gmod_dir() else {
@@ -164,7 +166,8 @@ fn setup_scene(
             ..default()
         },
         // Directional lights emit along their local -Z, so this points
-        // (-1, -1, 0) after the look_at, i.e. down and to the left.
+        // (-1, -1, 0) after the look_at: down and to the left, so floors are lit
+        // and vertical walls get distinguishable brightness.
         transform: Transform::from_xyz(-1.0, 1.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
         ..default()
     });
@@ -304,11 +307,9 @@ fn report_render_backend(
     );
     for window in &windows {
         println!(
-            "[perf] primary window: {}x{} physical, {}x{} render target (scale {})",
+            "[perf] primary window: {}x{} physical, scale factor {}",
             window.physical_width(),
             window.physical_height(),
-            window.resolution.width() as u32 * window.resolution.scale_factor() as u32,
-            window.resolution.height() as u32 * window.resolution.scale_factor() as u32,
             window.resolution.scale_factor()
         );
     }
@@ -430,11 +431,18 @@ fn main() {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "Universal Nostalgia Engine".to_string(),
-                    // Logical size stays 720p; the scale factor override makes
-                    // Bevy render to a smaller framebuffer and upscale, which
-                    // cuts fill rate roughly in half on the weakest scenes.
-                    resolution: WindowResolution::new(1280.0, 720.0)
-                        .with_scale_factor_override(RENDER_SCALE),
+                    // A fixed 720p framebuffer, no scale-factor override.
+                    //
+                    // `with_scale_factor_override` is not a render-scale knob:
+                    // it redefines what "1280x720" means in physical pixels, so
+                    // asking for 1280x720 at scale 0.75 actually produced a
+                    // 960x540 window whose framebuffer then reported 0x0 in
+                    // this diagnostic. The fill-rate win has to come from
+                    // rendering at a smaller explicit size instead.
+                    resolution: WindowResolution::new(
+                        WINDOW_WIDTH,
+                        WINDOW_HEIGHT,
+                    ),
                     ..default()
                 }),
                 ..default()

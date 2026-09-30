@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 bevy = { version = "0.13", default-features = false, features = ["bevy_winit", "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_asset", "x11", "tonemapping_luts"] }
 vpk = "0.3"
+vbsp = "0.9"

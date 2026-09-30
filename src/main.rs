@@ -1,7 +1,7 @@
 // bevy_diagnostic has no prelude module, so these must be imported explicitly.
 // `bevy_core_pipeline::prelude` only re-exports Camera3d/Camera3dBundle, so
 // Tonemapping (which lives in `core_3d::prelude`) needs an explicit import.
-use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
@@ -42,6 +42,11 @@ const SUN_ILLUMINANCE: f32 = 10_000.0;
 /// for fill rate; the renderer scales the result to the window.
 const WINDOW_WIDTH: f32 = 1280.0;
 const WINDOW_HEIGHT: f32 = 720.0;
+
+/// Chunks further than this from the camera are hidden. gm_construct's playable
+/// area is a few thousand units across, so this keeps the nearby detail and
+/// drops the rest of the 30k-unit map.
+const CHUNK_DRAW_DISTANCE: f32 = 8_000.0;
 
 fn inspect_vpk_archive() {
     let Some(gmod_dir) = find_gmod_dir() else {
@@ -142,6 +147,10 @@ fn spawn_camera(commands: &mut Commands, position: Vec3, yaw: f32, pitch: f32) {
             // transform or bright surfaces clip to flat white. ACES rolls off
             // highlights rather than hard-clipping them.
             tonemapping: Tonemapping::AcesFitted,
+            // Dithering runs per output pixel to hide banding in gradients.
+            // The world is untextured flat colour, so there is no gradient to
+            // band and the per-pixel cost buys nothing.
+            dither: DebandDither::Disabled,
             ..default()
         },
         Flycam { yaw, pitch },
@@ -190,14 +199,17 @@ fn setup_scene(
             })
             .collect();
 
-        for (bucket, chunk) in &map.chunks {
+        for chunk in &map.chunks {
             commands.spawn((
                 PbrBundle {
-                    mesh: meshes.add(chunk.clone()),
-                    material: materials[*bucket].clone(),
+                    mesh: meshes.add(chunk.mesh.clone()),
+                    material: materials[chunk.bucket].clone(),
                     ..default()
                 },
-                MapChunk,
+                MapChunk {
+                    center: chunk.center,
+                    radius: chunk.radius,
+                },
             ));
         }
 
@@ -386,10 +398,44 @@ fn log_startup_stats(
     }
 }
 
-/// Marks every spawned world chunk so the cull counter can identify them
+/// Marks every spawned world chunk so the cull systems can identify them
 /// without matching on mesh handles.
 #[derive(Component)]
-struct MapChunk;
+struct MapChunk {
+    center: Vec3,
+    radius: f32,
+}
+
+/// Hides chunks beyond `CHUNK_DRAW_DISTANCE`.
+///
+/// Frustum culling cannot help inside a dense area: standing in the warehouse,
+/// the tower is inside the view frustum yet contributes thousands of triangles
+/// from behind walls. A hard distance cut reclaims that. Chunks that are
+/// already hidden are skipped so the query only touches rows that change.
+fn cull_chunks_by_distance(
+    camera: Query<&GlobalTransform, With<Camera3d>>,
+    mut chunks: Query<(&MapChunk, &mut Visibility), With<MapChunk>>,
+) {
+    let Ok(camera) = camera.get_single() else {
+        return;
+    };
+    let camera_position = camera.translation();
+
+    for (chunk, mut visibility) in &mut chunks {
+        let distance = camera_position.distance(chunk.center) - chunk.radius;
+        let next = if distance > CHUNK_DRAW_DISTANCE {
+            Visibility::Hidden
+        } else {
+            Visibility::Visible
+        };
+
+        // Only write on change: `Mut` marks the component dirty on write, and
+        // dirtying all 50 chunks every frame would cause pointless extraction.
+        if *visibility != next {
+            *visibility = next;
+        }
+    }
+}
 
 fn main() {
     println!("universal-nostalgia-engine {} starting", env!("CARGO_PKG_VERSION"));
@@ -466,6 +512,7 @@ fn main() {
             Update,
             (
                 flycam_system,
+                cull_chunks_by_distance,
                 count_visible_chunks,
                 update_fps_overlay,
                 log_startup_stats,

@@ -17,7 +17,15 @@ const PLAYER_EYE_HEIGHT: f32 = 64.0;
 
 /// One draw-call group: a chunk mesh plus the index of the material bucket
 /// whose texture name it was grouped by.
-pub type ChunkMesh = (usize, Mesh);
+///
+/// Carries the chunk's bounding sphere so the renderer can distance-cull it
+/// without needing Bevy to have computed an `Aabb` first.
+pub struct ChunkMesh {
+    pub bucket: usize,
+    pub mesh: Mesh,
+    pub center: Vec3,
+    pub radius: f32,
+}
 
 #[derive(Resource)]
 pub struct LoadedMap {
@@ -62,6 +70,20 @@ struct ChunkBuffers {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
+}
+
+/// Centre and radius of the smallest sphere containing every vertex, computed
+/// from the AABB Bevy derives from the position attribute.
+fn bounding_sphere(mesh: &Mesh) -> (Vec3, f32) {
+    let Some(aabb) = mesh.compute_aabb() else {
+        return (Vec3::ZERO, 0.0);
+    };
+
+    let min = Vec3::from(aabb.min());
+    let max = Vec3::from(aabb.max());
+    let center = (min + max) * 0.5;
+    let radius = max.distance(min) * 0.5;
+    (center, radius)
 }
 
 fn chunk_key(center: Vec3) -> ChunkKey {
@@ -256,7 +278,15 @@ pub fn load_map() -> Option<LoadedMap> {
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
 
-        meshes.push((dominant_bucket, mesh));
+        // Bounding sphere from the merged positions, used for distance culling.
+        let (center, radius) = bounding_sphere(&mesh);
+
+        meshes.push(ChunkMesh {
+            bucket: dominant_bucket,
+            mesh,
+            center,
+            radius,
+        });
         chunk_count += 1;
     }
 
